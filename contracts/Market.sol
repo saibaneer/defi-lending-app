@@ -74,7 +74,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
 
     // LENDER
     function depositLoanAsset(uint256 amount) external {
-        updateGrowthRPS();
+        _updateGrowthRPS();
         _settleOutstandings(msg.sender);
         uint256 sharesReceived = deposit(amount, msg.sender);
         emit Deposited(msg.sender, balanceOf(msg.sender), sharesReceived);
@@ -128,12 +128,12 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         // STEP 5: distribute to LPs by increasing rewards-per-share
         uint256 currentTotalShares = totalSupply();
 
-        if(currentTotalShares == 0) return 0;
+        if(currentTotalShares == 0) return 0; //50000000000000000 | 0.05 ether | 0.05e18
 
         return interestAccrued * 1e18 / currentTotalShares;
     }
 
-    function updateGrowthRPS() internal {
+    function _updateGrowthRPS() internal {
         rewardPerShare += estimateGrowthRPS();
     }
 
