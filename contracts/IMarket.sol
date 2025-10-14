@@ -7,7 +7,7 @@ interface IMarket {
     // LENDER
     function depositLoanAsset(uint256 amount) external;
     function claimShareRewards() external;
-    function withdrawLoanAsset(uint256 amount) external;
+    function withdrawLoanAsset(uint256 amount, bool claimRewards) external;
 
 
     // BORROWER
