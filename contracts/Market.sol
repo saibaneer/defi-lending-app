@@ -58,6 +58,8 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         uint256 currentRepaymentCount
     );
 
+    event WithdrewCollateral(address indexed collateralAddress, address indexed market, address caller, uint256 amount);
+
     // -------------------------------
     // Global State
     // -------------------------------
@@ -169,6 +171,16 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         );
     }
 
+    function withdrawFromAvailableCollateral(uint256 amount, address collateralAddress) external {
+        require(amount > 0, "Must be greater than zero!");
+        _addressCheck(collateralAddress);
+        require(borrowerInfo[msg.sender].borrowerAssetAvailable[collateralAddress] >= amount, "Cannot withdraw this amount!");
+
+        borrowerInfo[msg.sender].borrowerAssetAvailable[collateralAddress] -= amount;
+        IERC20(collateralAddress).transfer(msg.sender, amount);
+        emit WithdrewCollateral(collateralAddress, address(this), msg.sender, amount);
+    }
+
     function borrow(
         uint256 amountInStableToken,
         address collateralTokenAddress
@@ -259,7 +271,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         borrowerInfo[msg.sender].activeLoanCount--;
         loans[loanId].currentStatus = LoanState.REPAID;
 
-        stableAsset.transfer(address(this), repaymentDue);
+        stableAsset.transferFrom(msg.sender, address(this), repaymentDue);
 
         emit LoanRepaid(
             loanId,
@@ -310,7 +322,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
 
     function liquidateLoan(bytes32 loanId) external {}
 
-    function maximumBorrowableAmount() external {}
+
 
     function setLiquidationThreshold(uint256 _liquidationThreshold) external {}
 
@@ -320,10 +332,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         uint256 _baseInterestRatePerSecond
     ) external {}
 
-    function calculatePriceTimesQuantity(
-        uint256 price,
-        uint256 quantity
-    ) internal view returns (uint256) {}
+
 
     function canBeLiquidated(bytes32 loanId) external view returns (bool) {}
 
