@@ -10,6 +10,7 @@ import {IMockOracle} from "./IMockOracle.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {MarketSupportLibrary} from "./library/MarketSupportLibrary.sol";
 import {LoanParameters, LoanState, Loan} from "./library/DataTypes.sol";
+import {ISwap} from "./ISwap.sol";
 
 // import {Initializable} from "@openzeppelin/contracts/proxy/utils";
 
@@ -59,6 +60,16 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
     );
 
     event WithdrewCollateral(address indexed collateralAddress, address indexed market, address caller, uint256 amount);
+    event LoanLiquidated(
+        bytes32 indexed loanId,
+        address indexed market,
+        address indexed collateralAsset,
+        address borrower,
+        address liquidator,
+        uint256 lpEarnings,
+        uint256 treasuryEarnings,
+        uint256 liquidatorEarnings
+    );
 
     // -------------------------------
     // Global State
@@ -66,7 +77,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
     IERC20 public stableAsset;
     uint256 public liquidationThreshold;
     uint256 public loanToValueRatio; //0 to 1
-    uint256 public baseInterestRatePerSecond;
+    // uint256 public baseInterestRatePerSecond;
     uint256 public lastUpdatedTime;
     uint256 public totalBorrows;
 
@@ -80,7 +91,8 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
     mapping(address => bool) public acceptableCollateralTokens;
 
     address public oracle;
-
+    address public swapPlatform;
+    address public treasury;
     // -------------------------------
     // Lender State
     // -------------------------------
@@ -110,6 +122,24 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         string memory _symbol
     ) ERC4626(_asset) ERC20(_name, _symbol) {
         stableAsset = _asset; // TODO check if neccesary
+        lastUpdatedTime = block.timestamp;
+    }
+
+    function getBorrowerAssetAvailable(address _borrower, address _collateralToken) external view returns(uint256){
+        _addressCheck(_borrower);
+        _addressCheck(_collateralToken);
+        return borrowerInfo[_borrower].borrowerAssetAvailable[_collateralToken];
+    }
+
+    function getBorrowerAssetBorrowed(address _borrower, address _collateralToken) external view returns(uint256){
+        _addressCheck(_borrower);
+        _addressCheck(_collateralToken);
+        return borrowerInfo[_borrower].borrowed[_collateralToken];
+    }
+
+    function getActiveLoanCount(address _borrower) external view returns(uint256) {
+        _addressCheck(_borrower);
+        return borrowerInfo[_borrower].activeLoanCount;
     }
 
     // LENDER
@@ -228,7 +258,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         bytes32 loanId = MarketSupportLibrary.generateLoanId(loanParams);
 
         loans[loanId] = Loan(loanParams, LoanState.ACTIVE);
-
+        totalBorrows += amountInStableToken;
         stableAsset.transfer(msg.sender, amountInStableToken);
         emit Borrowed(
             address(this),
@@ -270,7 +300,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         borrowerInfo[msg.sender].repaymentCount++;
         borrowerInfo[msg.sender].activeLoanCount--;
         loans[loanId].currentStatus = LoanState.REPAID;
-
+        totalBorrows -= loans[loanId].params.amountBorrowed;
         stableAsset.transferFrom(msg.sender, address(this), repaymentDue);
 
         emit LoanRepaid(
@@ -301,6 +331,8 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         return repaymentDue;
     }
 
+    
+
     // PLATFORM
     function setAcceptableCollateralAsset(address token) external {
         _addressCheck(token);
@@ -320,21 +352,79 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
         return acceptableCollateralTokens[token];
     }
 
-    function liquidateLoan(bytes32 loanId) external {}
+    function liquidateLoan(bytes32 loanId) external {
+        require(canBeLiquidated(loanId), "Loan cannot be liquidated!");
+        require(swapPlatform != address(0), "Set swap platform address!");
+        require(treasury != address(0), "Set treasury address!");
+
+        address collateralToken = loans[loanId].params.collateralTokenAddress;
+        uint256 collateralTokenQty = loans[loanId].params.collateralUnitsUsed;
+        // swap the collateral assets for a stable asset
+        uint256 amountOut = ISwap(swapPlatform).swapExactInputSingle(collateralToken, address(stableAsset), collateralTokenQty);
+        address borrower = loans[loanId].params.borrower;
+        require(borrower != msg.sender, "Cannot liquidate your own loan!");
+        loans[loanId].currentStatus = LoanState.LIQUIDATED;
+        if(borrowerInfo[borrower].activeLoanCount > 0){
+            borrowerInfo[borrower].activeLoanCount--;
+        }
+        borrowerInfo[borrower].liquidatedLoanCount++;
+        borrowerInfo[borrower].borrowed[collateralToken] -= collateralTokenQty;
+      
+        // distribute earnings
+        // -- LPs get 40%
+        // -- Treasury 40%
+        // -- Liquidator 20%
+        (, uint256 treasuryEarnings, uint256 liquidatorEarnings) = MarketSupportLibrary.splitAmountPrecise(amountOut);
+        stableAsset.transfer(treasury, treasuryEarnings);
+        stableAsset.transfer(msg.sender, liquidatorEarnings);
+
+        // emit an event
+        emit LoanLiquidated(loanId, address(this), collateralToken, borrower, msg.sender, treasuryEarnings, treasuryEarnings, liquidatorEarnings);
+    }
 
 
 
-    function setLiquidationThreshold(uint256 _liquidationThreshold) external {}
+    function setLiquidationThreshold(uint256 _liquidationThreshold) external {
+        require(_liquidationThreshold >= 0.6 ether, "Amount must be greater than or equal to 0.6 ether");
+        liquidationThreshold = _liquidationThreshold;
+    }
 
-    function setLoanToValueRatio(uint256 _loanToValueRatio) external {}
+    function setLoanToValueRatio(uint256 _loanToValueRatio) external {
+        require(_loanToValueRatio >= 0.4 ether, "Amount must be greater than or equal to 0.4 ether");
+        loanToValueRatio = _loanToValueRatio;
+    }
 
-    function setBaseInterestRatePerSecond(
-        uint256 _baseInterestRatePerSecond
-    ) external {}
+    // function setBaseInterestRatePerSecond(
+    //     uint256 _baseInterestRatePerSecond
+    // ) external {
+
+    // }
+
+
+    function setTreasuryAddress(address _treasury) external {
+        _addressCheck(_treasury);
+        treasury = _treasury;
+    }
+
+    function setSwapPlatformAddress(address _swapPlatform) external {
+        _addressCheck(_swapPlatform);
+        swapPlatform = _swapPlatform;
+    }
 
 
 
-    function canBeLiquidated(bytes32 loanId) external view returns (bool) {}
+    function canBeLiquidated(bytes32 loanId) public view returns (bool) {
+        require(loans[loanId].params.timeOfBorrow > 0, "Invalid borrow time");
+        require(loans[loanId].params.collateralTokenAddress != address(0), "Invalid collateral token");
+        require(loans[loanId].params.liquidationPrice > 0, "Invalid liquidation price");
+
+        address collateralToken = loans[loanId].params.collateralTokenAddress;
+        uint256 liquidationPrice = loans[loanId].params.liquidationPrice;
+
+        uint256 currentAssetPrice = IMockOracle(oracle).getAssetPrice(collateralToken);
+        bool isActive = loans[loanId].currentStatus == LoanState.ACTIVE;
+        return currentAssetPrice <= liquidationPrice && isActive ? true : false; 
+    }
 
     function estimateGrowthRPS() public view returns (uint256 accRPSDelta) {
         // STEP 1: elapsed time since last accrual
@@ -357,6 +447,7 @@ contract SimpleLendingMarket is IMarket, ERC4626 {
 
     function _updateGrowthRPS() internal {
         rewardPerShare += estimateGrowthRPS();
+        lastUpdatedTime = block.timestamp;
     }
 
     function _settleOutstandings(address user) internal {

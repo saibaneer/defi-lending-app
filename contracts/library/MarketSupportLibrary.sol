@@ -70,4 +70,17 @@ library MarketSupportLibrary {
                         : amt18 * 10 ** (dec - 18)
                 );
     }
+
+    function splitAmountPrecise(uint256 amount) 
+        public 
+        pure 
+        returns (
+            uint256 share1,
+            uint256 share2,
+            uint256 share3
+        ) {
+            share1 = (40 * amount) / 100;
+            share2 = (40 * amount) / 100;
+            share3 = amount - share1 - share2;
+        }
 }
